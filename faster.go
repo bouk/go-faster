@@ -11,80 +11,98 @@ import (
 
 var modifiedFunctions = make(map[string]bool)
 
-func callToReceiveCall(expr *ast.CallExpr) *ast.UnaryExpr {
-	return &ast.UnaryExpr{Op: token.ARROW, X: expr}
+func callToReceiveCall(expr *ast.CallExpr) chan *ast.UnaryExpr {
+	result := make(chan *ast.UnaryExpr)
+	go func() {
+		result <- func() *ast.UnaryExpr {
+			return &ast.UnaryExpr{Op: token.ARROW, X: expr}
+		}()
+	}()
+	return result
 }
 
-func typeToChanType(t ast.Expr) *ast.ChanType {
-	return &ast.ChanType{Value: t, Dir: ast.SEND | ast.RECV, Arrow: token.NoPos}
+func typeToChanType(t ast.Expr) chan *ast.ChanType {
+	result := make(chan *ast.ChanType)
+	go func() {
+		result <- func() *ast.ChanType {
+			return &ast.ChanType{Value: t, Dir: ast.SEND | ast.RECV, Arrow: token.NoPos}
+		}()
+	}()
+	return result
 }
 
-func increaseSpeed(f *ast.FuncDecl) *ast.FuncDecl {
-	returnType := f.Type.Results.List[0].Type
+func increaseSpeed(f *ast.FuncDecl) chan *ast.FuncDecl {
+	result := make(chan *ast.FuncDecl)
+	go func() {
+		result <- func() *ast.FuncDecl {
+			returnType := f.Type.Results.List[0].Type
 
-	res := &ast.FuncDecl{}
-	res.Body = &ast.BlockStmt{}
-	res.Doc = f.Doc
-	res.Name = f.Name
-	res.Recv = f.Recv
+			res := &ast.FuncDecl{}
+			res.Body = &ast.BlockStmt{}
+			res.Doc = f.Doc
+			res.Name = f.Name
+			res.Recv = f.Recv
 
-	res.Type = &ast.FuncType{
-		Params: f.Type.Params,
-		Results: &ast.FieldList{
-			List: []*ast.Field{
-				&ast.Field{
-					Type: typeToChanType(returnType),
-				},
-			},
-		},
-	}
-
-	resultObject := ast.NewObj(ast.Var, "result")
-	resultIdent := &ast.Ident{
-		NamePos: token.NoPos,
-		Name:    "result",
-		Obj:     resultObject,
-	}
-
-	innerFunc := &ast.FuncLit{
-		Body: f.Body,
-		Type: &ast.FuncType{
-			Results: f.Type.Results,
-		},
-	}
-
-	res.Body.List = append(res.Body.List, &ast.AssignStmt{
-		Lhs:    []ast.Expr{resultIdent},
-		TokPos: token.NoPos,
-		Tok:    token.DEFINE,
-		Rhs: []ast.Expr{
-			&ast.CallExpr{
-				Fun:      ast.NewIdent("make"),
-				Args:     []ast.Expr{typeToChanType(returnType)},
-				Ellipsis: token.NoPos,
-			},
-		},
-	})
-
-	res.Body.List = append(res.Body.List, &ast.GoStmt{
-		Call: &ast.CallExpr{
-			Fun: &ast.FuncLit{
-				Type: &ast.FuncType{Params: &ast.FieldList{}},
-				Body: &ast.BlockStmt{
-					List: []ast.Stmt{
-						&ast.SendStmt{
-							Chan:  resultIdent,
-							Value: &ast.CallExpr{Ellipsis: token.NoPos, Fun: innerFunc},
+			res.Type = &ast.FuncType{
+				Params: f.Type.Params,
+				Results: &ast.FieldList{
+					List: []*ast.Field{
+						&ast.Field{
+							Type: <-typeToChanType(returnType),
 						},
 					},
 				},
-			},
-		},
-	})
+			}
 
-	res.Body.List = append(res.Body.List, &ast.ReturnStmt{Results: []ast.Expr{resultIdent}})
+			resultObject := ast.NewObj(ast.Var, "result")
+			resultIdent := &ast.Ident{
+				NamePos: token.NoPos,
+				Name:    "result",
+				Obj:     resultObject,
+			}
 
-	return res
+			innerFunc := &ast.FuncLit{
+				Body: f.Body,
+				Type: &ast.FuncType{
+					Results: f.Type.Results,
+				},
+			}
+
+			res.Body.List = append(res.Body.List, &ast.AssignStmt{
+				Lhs:    []ast.Expr{resultIdent},
+				TokPos: token.NoPos,
+				Tok:    token.DEFINE,
+				Rhs: []ast.Expr{
+					&ast.CallExpr{
+						Fun:      ast.NewIdent("make"),
+						Args:     []ast.Expr{<-typeToChanType(returnType)},
+						Ellipsis: token.NoPos,
+					},
+				},
+			})
+
+			res.Body.List = append(res.Body.List, &ast.GoStmt{
+				Call: &ast.CallExpr{
+					Fun: &ast.FuncLit{
+						Type: &ast.FuncType{Params: &ast.FieldList{}},
+						Body: &ast.BlockStmt{
+							List: []ast.Stmt{
+								&ast.SendStmt{
+									Chan:  resultIdent,
+									Value: &ast.CallExpr{Ellipsis: token.NoPos, Fun: innerFunc},
+								},
+							},
+						},
+					},
+				},
+			})
+
+			res.Body.List = append(res.Body.List, &ast.ReturnStmt{Results: []ast.Expr{resultIdent}})
+
+			return res
+		}()
+	}()
+	return result
 }
 
 type visitor func(ast.Node)
@@ -94,19 +112,25 @@ func (v visitor) Visit(node ast.Node) ast.Visitor {
 	return v
 }
 
-func wrapInReceive(expr ast.Expr) ast.Expr {
-	if callExpr, ok := expr.(*ast.CallExpr); ok && callExpr.Lparen != token.NoPos {
-		if ident, ok := callExpr.Fun.(*ast.Ident); ok && modifiedFunctions[ident.Name] {
-			callExpr.Lparen = token.NoPos
-			return callToReceiveCall(callExpr)
-		}
-	}
-	return expr
+func wrapInReceive(expr ast.Expr) chan ast.Expr {
+	result := make(chan ast.Expr)
+	go func() {
+		result <- func() ast.Expr {
+			if callExpr, ok := expr.(*ast.CallExpr); ok && callExpr.Lparen != token.NoPos {
+				if ident, ok := callExpr.Fun.(*ast.Ident); ok && modifiedFunctions[ident.Name] {
+					callExpr.Lparen = token.NoPos
+					return <-callToReceiveCall(callExpr)
+				}
+			}
+			return expr
+		}()
+	}()
+	return result
 }
 
 func improveCallExprs(list []ast.Expr) {
 	for i, node := range list {
-		list[i] = wrapInReceive(node)
+		list[i] = <-wrapInReceive(node)
 	}
 }
 
@@ -127,7 +151,7 @@ func main() {
 		if funcDecl, ok := decl.(*ast.FuncDecl); ok && funcDecl.Recv == nil {
 			if funcDecl.Type.Results != nil && len(funcDecl.Type.Results.List) == 1 {
 				modifiedFunctions[funcDecl.Name.Name] = true
-				inputFile.Decls[i] = increaseSpeed(funcDecl)
+				inputFile.Decls[i] = <-increaseSpeed(funcDecl)
 			}
 		}
 	}
@@ -137,90 +161,90 @@ func main() {
 			ast.Walk(visitor(func(node ast.Node) {
 				switch n := node.(type) {
 				case *ast.Field:
-					n.Type = wrapInReceive(n.Type)
+					n.Type = <-wrapInReceive(n.Type)
 
 				case *ast.Ellipsis:
 					if n.Elt != nil {
-						n.Elt = wrapInReceive(n.Elt)
+						n.Elt = <-wrapInReceive(n.Elt)
 					}
 
 				case *ast.FuncLit:
 
 				case *ast.CompositeLit:
 					if n.Type != nil {
-						n.Type = wrapInReceive(n.Type)
+						n.Type = <-wrapInReceive(n.Type)
 					}
 					improveCallExprs(n.Elts)
 
 				case *ast.ParenExpr:
-					n.X = wrapInReceive(n.X)
+					n.X = <-wrapInReceive(n.X)
 
 				case *ast.SelectorExpr:
-					n.X = wrapInReceive(n.X)
+					n.X = <-wrapInReceive(n.X)
 
 				case *ast.IndexExpr:
-					n.X = wrapInReceive(n.X)
-					n.Index = wrapInReceive(n.Index)
+					n.X = <-wrapInReceive(n.X)
+					n.Index = <-wrapInReceive(n.Index)
 
 				case *ast.SliceExpr:
-					n.X = wrapInReceive(n.X)
+					n.X = <-wrapInReceive(n.X)
 					if n.Low != nil {
-						n.Low = wrapInReceive(n.Low)
+						n.Low = <-wrapInReceive(n.Low)
 					}
 					if n.High != nil {
-						n.High = wrapInReceive(n.High)
+						n.High = <-wrapInReceive(n.High)
 					}
 					if n.Max != nil {
-						n.Max = wrapInReceive(n.Max)
+						n.Max = <-wrapInReceive(n.Max)
 					}
 
 				case *ast.TypeAssertExpr:
-					n.X = wrapInReceive(n.X)
+					n.X = <-wrapInReceive(n.X)
 					if n.Type != nil {
-						n.Type = wrapInReceive(n.Type)
+						n.Type = <-wrapInReceive(n.Type)
 					}
 
 				case *ast.CallExpr:
-					n.Fun = wrapInReceive(n.Fun)
+					n.Fun = <-wrapInReceive(n.Fun)
 					improveCallExprs(n.Args)
 
 				case *ast.StarExpr:
-					n.X = wrapInReceive(n.X)
+					n.X = <-wrapInReceive(n.X)
 
 				case *ast.UnaryExpr:
-					n.X = wrapInReceive(n.X)
+					n.X = <-wrapInReceive(n.X)
 
 				case *ast.BinaryExpr:
-					n.X = wrapInReceive(n.X)
-					n.Y = wrapInReceive(n.Y)
+					n.X = <-wrapInReceive(n.X)
+					n.Y = <-wrapInReceive(n.Y)
 
 				case *ast.KeyValueExpr:
-					n.Key = wrapInReceive(n.Key)
-					n.Value = wrapInReceive(n.Value)
+					n.Key = <-wrapInReceive(n.Key)
+					n.Value = <-wrapInReceive(n.Value)
 
 				// Types
 				case *ast.ArrayType:
 					if n.Len != nil {
-						n.Len = wrapInReceive(n.Len)
+						n.Len = <-wrapInReceive(n.Len)
 					}
-					n.Elt = wrapInReceive(n.Elt)
+					n.Elt = <-wrapInReceive(n.Elt)
 
 				case *ast.MapType:
-					n.Key = wrapInReceive(n.Key)
-					n.Value = wrapInReceive(n.Value)
+					n.Key = <-wrapInReceive(n.Key)
+					n.Value = <-wrapInReceive(n.Value)
 
 				case *ast.ChanType:
-					n.Value = wrapInReceive(n.Value)
+					n.Value = <-wrapInReceive(n.Value)
 
 				case *ast.ExprStmt:
-					n.X = wrapInReceive(n.X)
+					n.X = <-wrapInReceive(n.X)
 
 				case *ast.SendStmt:
-					n.Chan = wrapInReceive(n.Chan)
-					n.Value = wrapInReceive(n.Value)
+					n.Chan = <-wrapInReceive(n.Chan)
+					n.Value = <-wrapInReceive(n.Value)
 
 				case *ast.IncDecStmt:
-					n.X = wrapInReceive(n.X)
+					n.X = <-wrapInReceive(n.X)
 
 				case *ast.AssignStmt:
 					improveCallExprs(n.Lhs)
@@ -230,36 +254,36 @@ func main() {
 					improveCallExprs(n.Results)
 
 				case *ast.IfStmt:
-					n.Cond = wrapInReceive(n.Cond)
+					n.Cond = <-wrapInReceive(n.Cond)
 
 				case *ast.CaseClause:
 					improveCallExprs(n.List)
 
 				case *ast.SwitchStmt:
 					if n.Tag != nil {
-						n.Tag = wrapInReceive(n.Tag)
+						n.Tag = <-wrapInReceive(n.Tag)
 					}
 
 				case *ast.ForStmt:
 					if n.Cond != nil {
-						n.Cond = wrapInReceive(n.Cond)
+						n.Cond = <-wrapInReceive(n.Cond)
 					}
 
 				case *ast.RangeStmt:
-					n.Key = wrapInReceive(n.Key)
+					n.Key = <-wrapInReceive(n.Key)
 					if n.Value != nil {
-						n.Value = wrapInReceive(n.Value)
+						n.Value = <-wrapInReceive(n.Value)
 					}
-					n.X = wrapInReceive(n.X)
+					n.X = <-wrapInReceive(n.X)
 
 				case *ast.ValueSpec:
 					if n.Type != nil {
-						n.Type = wrapInReceive(n.Type)
+						n.Type = <-wrapInReceive(n.Type)
 					}
 					improveCallExprs(n.Values)
 
 				case *ast.TypeSpec:
-					n.Type = wrapInReceive(n.Type)
+					n.Type = <-wrapInReceive(n.Type)
 
 				}
 			}), funcDecl)
